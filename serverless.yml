@@ -1,0 +1,151 @@
+service: rekon-api
+
+#frameworkVersion: '2'
+
+
+provider:
+  name: aws
+  runtime: python3.8
+  stage: ${opt:stage, 'dev'}
+  lambdaHashingVersion: 20201221
+  environment:
+    S3_BUCKET: ${self:custom.bucket}
+    DYNAMODB_TABLE: ${self:custom.dynamodb_table}
+  iam:
+    role:
+      statements:
+        - Effect: "Allow"
+          Action:
+            - "s3:PutObject"
+            - "s3:GetObject"
+          Resource: "arn:aws:s3:::${self:custom.bucket}/*"
+        - Effect: "Allow"
+          Action:
+            - "dynamodb:GetItem"
+            - "dynamodb:PutItem"
+            - "dynamodb:UpdateItem"
+            - "dynamodb:DeleteItem"
+          Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:custom.dynamodb_table}"
+        - Effect: "Allow"
+          Action:
+            - "rekognition:DetectLabels"
+          Resource: "*"
+
+functions:
+  get:
+    handler: api.blob_get
+    events:
+      - http:
+          path: blobs/{blob_id}
+          method: get
+          request: 
+            parameters: 
+              paths: 
+                blob_id: true
+
+  post:
+    handler: api.blob_post
+    events:
+      - http:
+          path: blobs
+          method: post
+  trigger_s3:
+    handler: triggers.trigger_rekognition
+    events:
+      - s3:
+          bucket: ${self:custom.bucket}
+          event: s3:ObjectCreated:*
+          existing: true
+  trigger_dynamodb:
+    handler: triggers.trigger_callback_url
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt:
+              - blobTable
+              - StreamArn
+
+custom:
+  apiGatewayXray: true
+  documentation:
+    info:
+      version: 0.0.1
+      title: "RekonAPI"
+      description: "Rekognition API"
+    resources:
+      -
+        path: "${opt:stage, 'dev'}/blobs"
+        description: "Path of blob"
+      -
+        path: "${opt:stage, 'dev'}/${blob_id}"
+        description: "Path to GET blob"
+
+    models:
+      -
+        name: "BlobCreationRequest"
+        description: "Blob request model."
+        contentType: "application/json"
+        schema: ${file(models/blob_post_request.json)}
+      -
+        name: "BlobCreationResponse"
+        description: "Blob response model"
+        contentType: "application/json"
+        schema: ${file(models/blob_post_response.json)}
+      -
+        name: "BlobRetrieveResponse"
+        description: "Blob retrieve response model"
+        contentType: "application/json"
+        schema: ${file(models/blob_get_response.json)}
+      -
+        name: "BlobErrorResponse"
+        description: "Blob error response model"
+        contentType: "application/json"
+        schema: ${file(models/blob_error.json)}
+      -
+        name: "BlobGetResponse"
+        description: "Blob Get response model"
+        contentType: "application/json"
+        schema: ${file(models/blob_get_response.json)}
+  bucket: "blob-presigned"
+  dynamodb_table: "blobs"
+
+
+resources:
+  Resources:
+    Bucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.bucket}
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        VersioningConfiguration:
+          Status: Enabled
+        CorsConfiguration:
+          CorsRules:
+            - AllowedHeaders: ['*']
+              AllowedMethods: [GET, PUT]
+              AllowedOrigins: ['*']
+              Id: CORSRuleId1
+              MaxAge: '3600'
+    blobTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.dynamodb_table}
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+
+plugins:
+  - serverless-aws-documentation
+  - serverless-api-gateway-xray
